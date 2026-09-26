@@ -1907,7 +1907,7 @@ class spell_warl_hand_of_guldan : public SpellScript
             return;
 
         // 1?3 shards. Core already took the minimum (1); spend the rest.
-        int32 const maxShards = std::max(1, GetEffectInfo().CalcValue(caster));
+        int32 const maxShards = std::max(1, GetEffectInfo().CalcValueAsInt(caster));
         int32 extra = 0;
         if (int32 current = caster->GetPower(POWER_SOUL_SHARDS); current > 0)
         {
