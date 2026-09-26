@@ -108,6 +108,9 @@ enum WarlockSpells
     SPELL_WARLOCK_VOLATILE_AGONY_TALENT             = 453034,
     SPELL_WARLOCK_WITHER_PERIODIC                   = 445474,
     SPELL_WARLOCK_WITHER_TALENT                     = 445465,
+    SPELL_WARLOCK_HAND_OF_GULDAN                 = 105174,
+    SPELL_WARLOCK_HAND_OF_GULDAN_DAMAGE          = 86040,
+    SPELL_WARLOCK_HAND_OF_GULDAN_SUMMON          = 104317,
 };
 
 enum MiscSpells
@@ -1877,6 +1880,74 @@ class spell_warl_volatile_agony : public SpellScript
     }
 };
 
+// 105174 - Hand of Gul'dan
+class spell_warl_hand_of_guldan : public SpellScript
+{
+    bool Validate(SpellInfo const* /*spellInfo*/) override
+    {
+        return ValidateSpellInfo({ SPELL_WARLOCK_HAND_OF_GULDAN_DAMAGE, SPELL_WARLOCK_HAND_OF_GULDAN_SUMMON });
+    }
+
+    void HandleDummy(SpellEffIndex /*effIndex*/)
+    {
+        Unit* caster = GetCaster();
+        if (!caster)
+            return;
+
+        Unit* target = GetHitUnit();
+        if (!target)
+            target = GetExplTargetUnit();
+
+        Position dest;
+        if (WorldLocation const* explDest = GetExplTargetDest())
+            dest = *explDest;
+        else if (target)
+            dest = target->GetPosition();
+        else
+            return;
+
+        // 1?3 shards. Core already took the minimum (1); spend the rest.
+        int32 const maxShards = std::max(1, GetEffectInfo().CalcValue(caster));
+        int32 extra = 0;
+        if (int32 current = caster->GetPower(POWER_SOUL_SHARDS); current > 0)
+        {
+            extra = std::min(current, maxShards - 1);
+            if (extra > 0)
+                caster->ModifyPower(POWER_SOUL_SHARDS, -extra);
+        }
+        int32 const shards = 1 + extra;
+
+        CastSpellExtraArgs args;
+        args.SetTriggerFlags(TRIGGERED_IGNORE_GCD | TRIGGERED_IGNORE_POWER_COST
+            | TRIGGERED_IGNORE_CAST_IN_PROGRESS | TRIGGERED_DONT_REPORT_CAST_ERROR);
+        args.SetTriggeringSpell(GetSpell());
+
+        // 86040: 8 yd Shadowflame hit, ~50.12% SP per shard.
+        for (int32 i = 0; i < shards; ++i)
+        {
+            if (target)
+                caster->CastSpell(target, SPELL_WARLOCK_HAND_OF_GULDAN_DAMAGE, args);
+            else
+                caster->CastSpell(dest, SPELL_WARLOCK_HAND_OF_GULDAN_DAMAGE, args);
+        }
+
+        // 104317: one Wild Imp per shard.
+        for (int32 i = 0; i < shards; ++i)
+        {
+            float angle = float(i) * (2.0f * float(M_PI) / float(std::max(1, shards)));
+            Position summonPos = dest;
+            summonPos.m_positionX += std::cos(angle) * 2.0f;
+            summonPos.m_positionY += std::sin(angle) * 2.0f;
+            caster->CastSpell(summonPos, SPELL_WARLOCK_HAND_OF_GULDAN_SUMMON, args);
+        }
+    }
+
+    void Register() override
+    {
+        OnEffectHitTarget += SpellEffectFn(spell_warl_hand_of_guldan::HandleDummy, EFFECT_0, SPELL_EFFECT_DUMMY);
+    }
+};
+
 void AddSC_warlock_spell_scripts()
 {
     RegisterSpellScript(spell_warl_absolute_corruption);
@@ -1938,4 +2009,5 @@ void AddSC_warlock_spell_scripts()
     RegisterSpellScript(spell_warl_unstable_affliction);
     RegisterSpellScript(spell_warl_vile_taint);
     RegisterSpellScript(spell_warl_volatile_agony);
+    RegisterSpellScript(spell_warl_hand_of_guldan);
 }
