@@ -133,8 +133,38 @@ enum WarlockSpellVisuals
 
 enum WildImp
 {
-    SPELL_FEL_FIREBOLT    = 104318
+    SPELL_FEL_FIREBOLT = 104318
 };
+
+static int32 WarlockScriptSP(Unit const* owner)
+{
+    int32 sp = std::max(
+        owner->SpellBaseDamageBonusDone(SPELL_SCHOOL_MASK_SHADOW),
+        owner->SpellBaseDamageBonusDone(SPELL_SCHOOL_MASK_FIRE));
+    if (sp < 200)
+        sp = 650;
+    return sp;
+}
+
+static void WarlockDealSchoolDamage(Unit* attacker, Unit* victim, uint32 spellId, int32 damage)
+{
+    SpellInfo const* info = sSpellMgr->GetSpellInfo(spellId, DIFFICULTY_NONE);
+    if (!info || !victim || !victim->IsAlive() || victim->IsImmunedToDamage(attacker, info))
+        return;
+
+    SpellNonMeleeDamage log(attacker, victim, info, SpellCastVisual{}, info->GetSchoolMask());
+    log.damage = uint32(std::max(1, damage));
+    log.originalDamage = log.damage;
+
+    uint32 absorb = 0;
+    Unit::DealDamageMods(attacker, victim, log.damage, &absorb);
+    log.absorb = absorb;
+    log.damage = log.damage > absorb ? log.damage - absorb : 0;
+
+    attacker->SendSpellNonMeleeDamageLog(&log);
+    Unit::DealDamage(attacker, victim, log.damage, nullptr, SPELL_DIRECT_DAMAGE,
+        info->GetSchoolMask(), info, false);
+}
 
 struct npc_warl_wild_imp : public ScriptedAI
 {
@@ -146,10 +176,8 @@ struct npc_warl_wild_imp : public ScriptedAI
         me->SetCanMelee(false);
         SetCombatMovement(false);
         _timer = 500;
-
         if (Unit* owner = me->GetOwner())
         {
-            me->SetOwnerGUID(owner->GetGUID());
             me->SetFaction(owner->GetFaction());
             me->SetLevel(owner->GetLevel());
         }
@@ -157,49 +185,23 @@ struct npc_warl_wild_imp : public ScriptedAI
 
     void UpdateAI(uint32 diff) override
     {
-        if (!UpdateVictim())
+        if (!UpdateVictim() || me->HasUnitState(UNIT_STATE_CASTING))
             return;
 
-        if (me->HasUnitState(UNIT_STATE_CASTING))
-            return;
-
-        if (_timer <= diff)
+        if (_timer > diff)
         {
-            Unit* victim = me->GetVictim();
-            if (victim && victim->IsAlive())
-            {
-                me->CastSpell(victim, SPELL_FEL_FIREBOLT, TRIGGERED_FULL_MASK);
-
-                SpellInfo const* bolt = sSpellMgr->GetSpellInfo(SPELL_FEL_FIREBOLT, DIFFICULTY_NONE);
-                if (bolt && !victim->IsImmunedToDamage(me, bolt))
-                {
-                    Unit* owner = me->GetOwner() ? me->GetOwner() : me;
-                    int32 sp = std::max(
-                        owner->SpellBaseDamageBonusDone(SPELL_SCHOOL_MASK_FIRE),
-                        owner->SpellBaseDamageBonusDone(SPELL_SCHOOL_MASK_SHADOW));
-                    if (sp < 200)
-                        sp = 650;
-
-                    int32 const dmg = std::max(1, int32(float(sp) * 0.12f));
-
-                    SpellNonMeleeDamage info(me, victim, bolt, SpellCastVisual{}, bolt->GetSchoolMask());
-                    info.damage = uint32(dmg);
-                    info.originalDamage = uint32(dmg);
-
-                    uint32 absorb = 0;
-                    Unit::DealDamageMods(me, victim, info.damage, &absorb);
-                    info.absorb = absorb;
-                    info.damage = uint32(dmg) > absorb ? uint32(dmg) - absorb : 0;
-
-                    me->SendSpellNonMeleeDamageLog(&info);
-                    Unit::DealDamage(me, victim, info.damage, nullptr, SPELL_DIRECT_DAMAGE,
-                        bolt->GetSchoolMask(), bolt, false);
-                }
-            }
-            _timer = 2000;
-        }
-        else
             _timer -= diff;
+            return;
+        }
+        _timer = 2000;
+
+        Unit* victim = me->GetVictim();
+        if (!victim || !victim->IsAlive())
+            return;
+
+        me->CastSpell(victim, SPELL_FEL_FIREBOLT, TRIGGERED_FULL_MASK);
+        Unit* owner = me->GetOwner() ? me->GetOwner() : me;
+        WarlockDealSchoolDamage(me, victim, SPELL_FEL_FIREBOLT, int32(float(WarlockScriptSP(owner)) * 0.12f));
     }
 
 private:
@@ -218,119 +220,87 @@ struct npc_warl_dreadstalker : public ScriptedAI
 
     void InitializeAI() override
     {
-        me->SetReactState(REACT_AGGRESSIVE);
-        SetCombatMovement(true);
         _didBite = false;
-
-        if (Unit* owner = me->GetOwner())
-        {
-            me->SetOwnerGUID(owner->GetGUID());
-            me->SetFaction(owner->GetFaction());
-            me->SetLevel(owner->GetLevel());
-            me->SetImmuneToPC(false);
-            me->SetImmuneToNPC(false);
-            me->RemoveUnitFlag(UNIT_FLAG_NON_ATTACKABLE);
-            me->RemoveUnitFlag(UNIT_FLAG_UNINTERACTIBLE);
-            me->SetReactState(REACT_AGGRESSIVE);
-        }
-
+        _leapt   = false;
+        ApplyOwner();
         AcquireOwnerTarget();
     }
 
     void JustAppeared() override
     {
-        if (Unit* owner = me->GetOwner())
-        {
-            me->SetOwnerGUID(owner->GetGUID());
-            me->SetFaction(owner->GetFaction());
-            me->SetLevel(owner->GetLevel());
-            me->SetImmuneToPC(false);
-            me->SetImmuneToNPC(false);
-            me->RemoveUnitFlag(UNIT_FLAG_NON_ATTACKABLE);
-            me->RemoveUnitFlag(UNIT_FLAG_UNINTERACTIBLE);
-            me->SetReactState(REACT_AGGRESSIVE);
-        }
+        ApplyOwner();
         AcquireOwnerTarget();
-    }
-
-    void JustEngagedWith(Unit* /*who*/) override
-    {
-        _didBite = false;
     }
 
     void UpdateAI(uint32 /*diff*/) override
     {
         if (!me->GetVictim())
             AcquireOwnerTarget();
-
         if (!UpdateVictim())
+            return;
+
+        Unit* victim = me->GetVictim();
+        if (!victim)
             return;
 
         if (!_didBite)
         {
-            if (Unit* victim = me->GetVictim())
-            {
-                me->CastSpell(victim, SPELL_DREADBITE, TRIGGERED_FULL_MASK);
-
-                if (SpellInfo const* bite = sSpellMgr->GetSpellInfo(SPELL_DREADBITE, DIFFICULTY_NONE))
-                {
-                    if (victim->IsAlive() && !victim->IsImmunedToDamage(me, bite))
-                    {
-                        Unit* owner = me->GetOwner() ? me->GetOwner() : me;
-                        int32 sp = std::max(
-                            owner->SpellBaseDamageBonusDone(SPELL_SCHOOL_MASK_SHADOW),
-                            owner->SpellBaseDamageBonusDone(SPELL_SCHOOL_MASK_FIRE));
-                        if (sp < 200)
-                            sp = 650;
-
-                        int32 const dmg = std::max(1, int32(float(sp) * 0.35f));
-
-                        SpellNonMeleeDamage info(me, victim, bite, SpellCastVisual{}, bite->GetSchoolMask());
-                        info.damage = uint32(dmg);
-                        info.originalDamage = uint32(dmg);
-
-                        uint32 absorb = 0;
-                        Unit::DealDamageMods(me, victim, info.damage, &absorb);
-                        info.absorb = absorb;
-                        info.damage = uint32(dmg) > absorb ? uint32(dmg) - absorb : 0;
-
-                        me->SendSpellNonMeleeDamageLog(&info);
-                        Unit::DealDamage(me, victim, info.damage, nullptr, SPELL_DIRECT_DAMAGE,
-                            bite->GetSchoolMask(), bite, false);
-                    }
-                }
-            }
+            me->CastSpell(victim, SPELL_DREADBITE, TRIGGERED_FULL_MASK);
+            Unit* owner = me->GetOwner() ? me->GetOwner() : me;
+            WarlockDealSchoolDamage(me, victim, SPELL_DREADBITE,
+                int32(float(WarlockScriptSP(owner)) * 0.35f));
             _didBite = true;
+            return;   // next tick: leap + melee
         }
 
-        if (Unit* victim = me->GetVictim())
+        if (!_leapt && me->GetExactDist(victim) > 4.0f)
         {
-            if (me->isAttackReady() && me->IsWithinMeleeRange(victim))
-            {
-                me->AttackerStateUpdate(victim);
-                me->resetAttackTimer();
-            }
+            float const o = me->GetAbsoluteAngle(victim);
+            Position p = victim->GetPosition();
+            p.m_positionX -= std::cos(o) * 2.5f;
+            p.m_positionY -= std::sin(o) * 2.5f;
+            p.m_positionZ  = victim->GetPositionZ();
+            me->NearTeleportTo(p);
+            _leapt = true;
+        }
+
+        if (me->isAttackReady() && me->GetExactDist(victim) <= 6.0f)
+        {
+            me->AttackerStateUpdate(victim);
+            me->resetAttackTimer();
         }
     }
 
 private:
-    void AcquireOwnerTarget()
+    void ApplyOwner()
     {
-        Unit* owner = me->GetOwner();
-        if (!owner)
-            owner = me->GetCharmerOrOwner();
+        Unit* owner = me->GetOwner() ? me->GetOwner() : me->GetCharmerOrOwner();
         if (!owner)
             return;
+        me->SetFaction(owner->GetFaction());
+        me->SetLevel(owner->GetLevel());
+        me->SetImmuneToPC(false);
+        me->SetImmuneToNPC(false);
+        me->SetReactState(REACT_AGGRESSIVE);
+        me->SetCanMelee(true);
+        me->SetCombatReach(4.0f);
+        SetCombatMovement(true);
+    }
 
+    void AcquireOwnerTarget()
+    {
+        Unit* owner = me->GetOwner() ? me->GetOwner() : me->GetCharmerOrOwner();
+        if (!owner)
+            return;
         Unit* target = owner->GetVictim();
         if (!target)
             target = ObjectAccessor::GetUnit(*me, owner->GetTarget());
-
         if (target && target->IsAlive())
             AttackStart(target);
     }
 
     bool _didBite = false;
+    bool _leapt   = false;
 };
 
 // 146739 - Corruption
@@ -2115,44 +2085,12 @@ class spell_warl_hand_of_guldan : public SpellScript
         else
             return;
 
-        // Tooltip version: always 3 shards, 3 imps. Core already paid the spell cost.
         int32 const shards = 3;
-
-        int32 const spShadow = caster->SpellBaseDamageBonusDone(SPELL_SCHOOL_MASK_SHADOW);
-        int32 const spFire   = caster->SpellBaseDamageBonusDone(SPELL_SCHOOL_MASK_FIRE);
-        int32 sp = std::max(spShadow, spFire);
-        if (sp < 200)
-            sp = 650;
-
-        int32 const damage = std::max(1, int32(float(sp) * 0.501188f)) * shards;
-
-        CastSpellExtraArgs args;
-        args.SetTriggerFlags(TRIGGERED_IGNORE_GCD | TRIGGERED_IGNORE_POWER_COST
-            | TRIGGERED_IGNORE_CAST_IN_PROGRESS | TRIGGERED_DONT_REPORT_CAST_ERROR);
-        args.SetTriggeringSpell(GetSpell());
+        int32 const damage = std::max(1, int32(float(WarlockScriptSP(caster)) * 0.501188f)) * shards;
 
         SpellInfo const* hogInfo = sSpellMgr->GetSpellInfo(SPELL_WARLOCK_HAND_OF_GULDAN_DAMAGE, DIFFICULTY_NONE);
         if (!hogInfo)
             return;
-
-        auto dealHog = [caster, hogInfo, damage](Unit* victim)
-        {
-            if (!victim || !victim->IsAlive() || victim->IsImmunedToDamage(caster, hogInfo))
-                return;
-
-            SpellNonMeleeDamage dmgInfo(caster, victim, hogInfo, SpellCastVisual{}, hogInfo->GetSchoolMask());
-            dmgInfo.damage = uint32(damage);
-            dmgInfo.originalDamage = uint32(damage);
-
-            uint32 absorb = 0;
-            Unit::DealDamageMods(caster, victim, dmgInfo.damage, &absorb);
-            dmgInfo.absorb = absorb;
-            dmgInfo.damage = uint32(damage) > absorb ? uint32(damage) - absorb : 0;
-
-            caster->SendSpellNonMeleeDamageLog(&dmgInfo);
-            Unit::DealDamage(caster, victim, dmgInfo.damage, nullptr, SPELL_DIRECT_DAMAGE,
-                hogInfo->GetSchoolMask(), hogInfo, false);
-        };
 
         std::list<Unit*> units;
         float const searchRange = caster->GetDistance(dest) + 8.0f;
@@ -2165,17 +2103,21 @@ class spell_warl_hand_of_guldan : public SpellScript
         {
             if (u->IsAlive() && u->GetExactDist(&dest) <= 8.0f)
             {
-                dealHog(u);
+                WarlockDealSchoolDamage(caster, u, SPELL_WARLOCK_HAND_OF_GULDAN_DAMAGE, damage);
                 hit.insert(u->GetGUID());
             }
         }
-
         if (target && hit.find(target->GetGUID()) == hit.end())
-            dealHog(target);
+            WarlockDealSchoolDamage(caster, target, SPELL_WARLOCK_HAND_OF_GULDAN_DAMAGE, damage);
+
+        CastSpellExtraArgs args;
+        args.SetTriggerFlags(TRIGGERED_IGNORE_GCD | TRIGGERED_IGNORE_POWER_COST
+            | TRIGGERED_IGNORE_CAST_IN_PROGRESS | TRIGGERED_DONT_REPORT_CAST_ERROR);
+        args.SetTriggeringSpell(GetSpell());
 
         for (int32 i = 0; i < shards; ++i)
         {
-            float const angle = float(i) * (2.0f * float(M_PI) / float(std::max(1, shards)));
+            float const angle = float(i) * (2.0f * float(M_PI) / float(shards));
             Position summonPos = dest;
             summonPos.m_positionX += std::cos(angle) * 2.0f;
             summonPos.m_positionY += std::sin(angle) * 2.0f;
@@ -2189,39 +2131,29 @@ class spell_warl_hand_of_guldan : public SpellScript
     }
 };
 
-class DreadstalkerEngageEvent : public BasicEvent
+class DreadstalkerBiteEvent : public BasicEvent
 {
 public:
-    DreadstalkerEngageEvent(Unit* owner, ObjectGuid targetGuid) : _owner(owner), _targetGuid(targetGuid) { }
+    DreadstalkerBiteEvent(Unit* owner, ObjectGuid targetGuid)
+        : _owner(owner), _targetGuid(targetGuid) { }
 
     bool Execute(uint64 /*time*/, uint32 /*diff*/) override
     {
         if (!_owner)
             return true;
-
         Unit* target = ObjectAccessor::GetUnit(*_owner, _targetGuid);
         if (!target || !target->IsAlive())
             return true;
 
         std::list<TempSummon*> stalkers;
         _owner->GetAllMinionsByEntry(stalkers, 98035);
-        for (TempSummon* stalker : stalkers)
+        int32 const dmg = int32(float(WarlockScriptSP(_owner)) * 0.35f);
+        for (TempSummon* s : stalkers)
         {
-            if (!stalker || !stalker->IsAlive())
+            if (!s || !s->IsAlive())
                 continue;
-
-            stalker->SetFaction(_owner->GetFaction());
-            stalker->SetLevel(_owner->GetLevel());
-            stalker->SetReactState(REACT_AGGRESSIVE);
-            stalker->SetImmuneToPC(false);
-            stalker->SetImmuneToNPC(false);
-            stalker->RemoveUnitFlag(UNIT_FLAG_NON_ATTACKABLE);
-            stalker->RemoveUnitFlag(UNIT_FLAG_UNINTERACTIBLE);
-            if (CreatureAI* ai = stalker->AI())
-                ai->AttackStart(target);
-            else
-                stalker->Attack(target, true);
-            stalker->EngageWithTarget(target);
+            s->CastSpell(target, SPELL_WARLOCK_DREADBITE, TRIGGERED_FULL_MASK);
+            WarlockDealSchoolDamage(s, target, SPELL_WARLOCK_DREADBITE, dmg);
         }
         return true;
     }
@@ -2249,14 +2181,9 @@ class spell_warl_call_dreadstalkers : public SpellScript
             return;
 
         Unit* target = GetExplTargetUnit();
-
-        Position dest;
+        Position dest = target ? target->GetPosition() : caster->GetPosition();
         if (WorldLocation const* explDest = GetExplTargetDest())
             dest = *explDest;
-        else if (target)
-            dest = target->GetPosition();
-        else
-            dest = caster->GetPosition();
 
         CastSpellExtraArgs args;
         args.SetTriggerFlags(TRIGGERED_IGNORE_GCD | TRIGGERED_IGNORE_POWER_COST
@@ -2267,12 +2194,11 @@ class spell_warl_call_dreadstalkers : public SpellScript
         left.m_positionX += 2.0f;
         Position right = dest;
         right.m_positionX -= 2.0f;
-
         caster->CastSpell(left,  SPELL_WARLOCK_CALL_DREADSTALKERS_SUMMON_1, args);
         caster->CastSpell(right, SPELL_WARLOCK_CALL_DREADSTALKERS_SUMMON_2, args);
-
         if (target && target->IsAlive())
-            caster->m_Events.AddEventAtOffset(new DreadstalkerEngageEvent(caster, target->GetGUID()), 200ms);
+            caster->m_Events.AddEventAtOffset(
+                new DreadstalkerBiteEvent(caster, target->GetGUID()), 200ms);
     }
 
     void Register() override
