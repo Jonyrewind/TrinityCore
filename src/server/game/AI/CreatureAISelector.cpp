@@ -85,11 +85,7 @@ namespace FactorySelector
 
     CreatureAI* SelectAI(Creature* creature)
     {
-        // special pet case, if a tamed creature uses AIName (example SmartAI) we need to override it
-        if (creature->IsPet())
-            return ASSERT_NOTNULL(sCreatureAIRegistry->GetRegistryItem("PetAI"))->Create(creature);
-
-        // scriptname in db
+        // DB ScriptName wins, including pets/guardians (Wild Imp).
         try
         {
             if (CreatureAI* scriptedAI = sScriptMgr->GetCreatureAI(creature))
@@ -101,11 +97,20 @@ namespace FactorySelector
                 creature->GetScriptName(), creature->GetEntry(), e.what());
         }
 
+        if (creature->IsPet())
+            return ASSERT_NOTNULL(sCreatureAIRegistry->GetRegistryItem("PetAI"))->Create(creature);
+
         return SelectFactory<CreatureAI>(creature)->Create(creature);
     }
 
     uint32 GetSelectedAIId(Creature const* creature)
     {
+        if (uint32 id = creature->GetScriptId())
+        {
+            if (sScriptMgr->CanCreateCreatureAI(id))
+                return id;
+        }
+
         if (creature->IsPet())
         {
             auto const* registry = ASSERT_NOTNULL(sCreatureAIRegistry->GetRegistryItem("PetAI"));
@@ -113,14 +118,6 @@ namespace FactorySelector
             ASSERT(factory);
 
             return factory->GetScriptId();
-        }
-
-        if (uint32 id = creature->GetScriptId())
-        {
-            if (sScriptMgr->CanCreateCreatureAI(id))
-            {
-                return id;
-            }
         }
 
         auto const* factory = dynamic_cast<SelectableAI<Creature, CreatureAI> const*>(SelectFactory<CreatureAI>(creature));
